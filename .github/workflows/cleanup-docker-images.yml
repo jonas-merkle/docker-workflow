@@ -21,12 +21,12 @@ jobs:
         OWNER=$(echo "$REPO" | cut -d'/' -f1)
         REPO_NAME=$(echo "$REPO" | cut -d'/' -f2)
 
-        # Fetch the list of untagged images
-        echo "Fetching list of Docker images for repository: $REPO"
+        # Fetch the list of untagged images excluding those ending in ".sig"
+        echo "Fetching list of untagged Docker images for repository: $REPO"
         images=$(gh api -H "Accept: application/vnd.github+json" \
           "/users/$OWNER/packages/container/$REPO_NAME/versions" \
           --paginate \
-          --jq '.[] | select(.metadata.container.tags | length == 0) | .id')
+          --jq '.[] | select(.metadata.container.tags == [] and (.name | endswith(".sig") | not)) | .id')
 
         # Ensure that images were fetched successfully
         if [[ $? -ne 0 || -z "$images" ]]; then
@@ -46,4 +46,4 @@ jobs:
           fi
         done
 
-        echo "Completed deletion of untagged images."
+        echo "Completed deletion of untagged images, excluding those ending with .sig."
