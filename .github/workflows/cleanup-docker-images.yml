@@ -1,0 +1,49 @@
+name: Cleanup Docker Images (in GitHub Container Registry)
+
+on:
+  workflow_call:
+
+env:
+  GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+jobs:
+  cleanup-untagged-images:
+    runs-on: ubuntu-latest
+    steps:
+
+    - name: Cleanup untagged images
+      run: |
+
+        # Set the repository name here, e.g., "username/repository"
+        REPO=${{ github.repository }}
+
+        # Extract the owner and repository name
+        OWNER=$(echo "$REPO" | cut -d'/' -f1)
+        REPO_NAME=$(echo "$REPO" | cut -d'/' -f2)
+
+        # Fetch the list of untagged images
+        echo "Fetching list of Docker images for repository: $REPO"
+        images=$(gh api -H "Accept: application/vnd.github+json" \
+          "/users/$OWNER/packages/container/$REPO_NAME/versions" \
+          --paginate \
+          --jq '.[] | select(.metadata.container.tags | length == 0) | .id')
+
+        # Ensure that images were fetched successfully
+        if [[ $? -ne 0 || -z "$images" ]]; then
+          echo "Error fetching images or no untagged images found. Please ensure you have the required permissions."
+          exit 1
+        fi
+
+        # Loop through each untagged image and delete it
+        for image_id in $images; do
+          if [[ "$image_id" =~ ^[0-9]+$ ]]; then
+            echo "Deleting untagged image with ID: $image_id"
+            gh api -X DELETE -H "Accept: application/vnd.github+json" \
+              "/users/$OWNER/packages/container/$REPO_NAME/versions/$image_id" \
+              && echo "Deleted image ID: $image_id"
+          else
+            echo "Skipping invalid image ID: $image_id"
+          fi
+        done
+
+        echo "Completed deletion of untagged images."
