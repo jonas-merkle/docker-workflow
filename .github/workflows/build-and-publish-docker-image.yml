@@ -210,6 +210,13 @@ jobs:
     steps:
       - name: Install cosign
         uses: sigstore/cosign-installer@v3.7.0
+
+      - name: Login to GitHub Container Registry 
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
     
       # Sign the resulting Docker image digest except on PRs.
       # This will only write to the public Rekor transparency log when the Docker
