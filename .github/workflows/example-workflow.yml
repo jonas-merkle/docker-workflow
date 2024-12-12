@@ -1,0 +1,31 @@
+name: Example Workflow
+
+on:
+  push:
+    branches:
+      - main
+      - develop
+    tags:
+      - 'v*'
+
+  pull_request:
+    branches:
+      - main
+
+  #schedule:
+    #- cron: '0 0 * * *'
+
+  workflow_dispatch:
+
+jobs:
+  build-and-publish:
+    #uses: jonas-merkle/docker-workflow/.github/workflows/build-and-publish-docker-image.yml@main
+    uses: ./.github/workflows/build-and-publish-docker-image.yml
+    with:
+      registry-image: ghcr.io/${{ github.repository }}
+      work-dir: ./src
+
+  invoke-cleanup:
+    #uses: jonas-merkle/docker-workflow/.github/workflows/cleanup-docker-images.yml@main
+    uses: ./.github/workflows/cleanup-docker-images.yml
+    needs: build-and-publish
