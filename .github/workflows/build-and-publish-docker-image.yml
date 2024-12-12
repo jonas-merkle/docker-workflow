@@ -1,0 +1,226 @@
+name: Build and Publish Docker Image
+
+on:
+  workflow_call:
+    inputs:
+      registry-image:
+        description: 'The (registry) image name'
+        required: true
+        type: string
+      work-dir:
+        description: 'The working directory for the Docker build'
+        required: true
+        type: string
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.platforms.outputs.matrix }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Create matrix
+        id: platforms
+        run: |
+          cd ${{ inputs.work-dir }}
+          echo "matrix=$(docker buildx bake image-all --print | jq -cr '.target."image-all".platforms')" >>${GITHUB_OUTPUT}
+
+      - name: Show matrix
+        run: |
+          echo ${{ steps.platforms.outputs.matrix }}
+
+      - name: Docker meta
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: |
+            ${{ inputs.registry-image }}
+          tags: |
+            type=ref,event=pr
+            type=ref,event=branch
+            type=semver,pattern={{version}}
+            type=sha
+            type=schedule,pattern=nightly
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: Rename meta bake definition file
+        run: |
+          mv "${{ steps.meta.outputs.bake-file }}" "/tmp/bake-meta.json"
+
+      - name: Upload meta bake definition
+        uses: actions/upload-artifact@v4
+        with:
+          name: bake-meta
+          path: /tmp/bake-meta.json
+          if-no-files-found: error
+          retention-days: 1
+
+  build:
+    runs-on: ubuntu-latest
+    needs:
+      - prepare
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        platform: ${{ fromJson(needs.prepare.outputs.matrix) }}
+    steps:
+      - name: Prepare
+        run: |
+          platform=${{ matrix.platform }}
+          echo "PLATFORM_PAIR=${platform//\//-}" >> $GITHUB_ENV
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download meta bake definition
+        uses: actions/download-artifact@v4
+        with:
+          name: bake-meta
+          path: /tmp
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Cache Docker layers
+        uses: actions/cache@v4
+        with:
+          path: /tmp/.buildx-cache
+          key: ${{ runner.os }}-buildx-${{ matrix.platform }}-${{ github.sha }}
+          restore-keys: |
+            ${{ runner.os }}-buildx-${{ matrix.platform }}
+
+      - name: Login to GitHub Container Registry 
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build
+        id: bake
+        uses: docker/bake-action@v5
+        with:
+          workdir: ${{ inputs.work-dir }}
+          files: |
+            ./docker-bake.hcl
+            /tmp/bake-meta.json
+          targets: image
+          set: |
+            *.tags=
+            *.platform=${{ matrix.platform }}
+            *.output=type=image,"name=${{ inputs.registry-image }}",push-by-digest=true,name-canonical=true,push=true
+            *.cache-from=type=local,src=/tmp/.buildx-cache
+            *.cache-to=type=local,dest=/tmp/.buildx-cache-new,mode=max
+
+      - name: Export digest
+        run: |
+          mkdir -p /tmp/digests
+          digest="${{ fromJSON(steps.bake.outputs.metadata).image['containerimage.digest'] }}"
+          touch "/tmp/digests/${digest#sha256:}"
+
+      - name: Upload digest
+        uses: actions/upload-artifact@v4
+        with:
+          name: digests-${{ env.PLATFORM_PAIR }}
+          path: /tmp/digests/*
+          if-no-files-found: error
+          retention-days: 1
+      
+      # Temp fix
+      # https://github.com/docker/build-push-action/issues/252
+      # https://github.com/moby/buildkit/issues/1896
+      - name: Move cache
+        run: |
+          rm -rf /tmp/.buildx-cache
+          mv /tmp/.buildx-cache-new /tmp/.buildx-cache 
+
+  merge:
+    runs-on: ubuntu-latest
+    needs:
+      - build
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      root_name: ${{ steps.inspect.outputs.root_name }}
+      root_digest: ${{ steps.inspect.outputs.root_digest }}
+    steps:
+      - name: Download meta bake definition
+        uses: actions/download-artifact@v4
+        with:
+          name: bake-meta
+          path: /tmp
+
+      - name: Download digests
+        uses: actions/download-artifact@v4
+        with:
+          path: /tmp/digests
+          pattern: digests-*
+          merge-multiple: true
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to GitHub Container Registry 
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Create manifest list and push
+        working-directory: /tmp/digests
+        run: |
+          docker buildx imagetools create --progress plain $(jq -cr '.target."docker-metadata-action".tags | map(select(startswith("${{ inputs.registry-image }}")) | "-t " + .) | join(" ")' /tmp/bake-meta.json) \
+            $(printf '${{ inputs.registry-image }}@sha256:%s ' *)
+
+      - name: Inspect image
+        id: inspect
+        run: |
+          docker buildx imagetools inspect ${{ inputs.registry-image }}:$(jq -r '.target."docker-metadata-action".args.DOCKER_META_VERSION' /tmp/bake-meta.json)
+          inspect_output=$(docker buildx imagetools inspect ${{ inputs.registry-image }}:$(jq -r '.target."docker-metadata-action".args.DOCKER_META_VERSION' /tmp/bake-meta.json) --format "{{json .}}")
+          root_name=$(echo "$inspect_output" | jq -r '.name')
+          root_digest=$(echo "$inspect_output" | jq -r '.manifest.digest')
+          echo "root_name=$root_name"
+          echo "root_digest=$root_digest"
+          echo "root_name=$root_name" >> $GITHUB_OUTPUT
+          echo "root_digest=$root_digest" >> $GITHUB_OUTPUT
+
+  sign:
+    runs-on: ubuntu-latest
+    needs:
+      - merge
+    permissions:
+      contents: read
+      packages: write
+      # This is used to complete the identity challenge
+      # with sigstore/fulcio when running outside of PRs.
+      id-token: write
+    if: ${{ github.event_name != 'pull_request' }}
+    #if: github.event_name == 'workflow_dispatch'
+    continue-on-error: true
+    steps:
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3.7.0
+    
+      # Sign the resulting Docker image digest except on PRs.
+      # This will only write to the public Rekor transparency log when the Docker
+      # repository is public to avoid leaking data.  If you would like to publish
+      # transparency data even for private images, pass --force to cosign below.
+      # https://github.com/sigstore/cosign
+      - name: Sign the published Docker image
+        env:
+          TAGS: ${{ needs.merge.outputs.root_name }}
+          DIGEST: ${{ needs.merge.outputs.root_digest }}
+        # This step uses the identity token to provision an ephemeral certificate
+        # against the sigstore community Fulcio instance.
+        run: |
+          echo "${TAGS}" | xargs -I {} cosign sign --yes {}@${DIGEST}
