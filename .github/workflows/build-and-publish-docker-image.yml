@@ -103,6 +103,12 @@ jobs:
             mkdir -p /tmp/.buildx-cache
           fi
 
+      - name: Create new cache directory (only if it doesn't exist)
+        run: |
+          if [ ! -d /tmp/.buildx-cache-new ]; then
+            mkdir -p /tmp/.buildx-cache-new
+          fi
+
       - name: Login to GitHub Container Registry 
         uses: docker/login-action@v3
         with:
